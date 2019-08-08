@@ -44,6 +44,7 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.NullableCoder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.expansion.ExternalTransformRegistrar;
@@ -452,6 +453,8 @@ public class KafkaIO {
               return VarIntCoder.of();
             } else if (returnType.equals(Long.class)) {
               return VarLongCoder.of();
+            } else if (returnType.equals(String.class)) {
+              return StringUtf8Coder.of();
             } else {
               throw new RuntimeException("Couldn't infer Coder from " + deserializer);
             }
@@ -1696,10 +1699,34 @@ public class KafkaIO {
   }
 
   private static Class resolveClass(String className) {
+    if (org.apache.kafka.common.serialization.ByteArrayDeserializer.class.getName().equals(className)) {
+      return ByteArrayDeserializer.class;
+    }
     try {
       return Class.forName(className);
     } catch (ClassNotFoundException e) {
       throw new RuntimeException("Could not find class: " + className);
+    }
+  }
+
+  public static class ByteArrayDeserializer implements Deserializer<byte[]> {
+
+    @Override
+    public void configure(Map<String, ?> configs, boolean isKey) {
+      // nothing to do
+    }
+
+    @Override
+    public byte[] deserialize(String topic, byte[] data) {
+      if (data == null) {
+        return new byte[0];
+      }
+      return data;
+    }
+
+    @Override
+    public void close() {
+      // nothing to do
     }
   }
 }

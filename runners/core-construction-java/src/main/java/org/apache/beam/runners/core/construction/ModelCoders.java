@@ -36,6 +36,7 @@ public class ModelCoders {
   // coders?
   public static final String INT64_CODER_URN = getUrn(StandardCoders.Enum.VARINT);
   public static final String STRING_UTF8_CODER_URN = getUrn(StandardCoders.Enum.STRING_UTF8);
+  public static final String KAFKA_RECORD_CODER_URN = "kafka:record:coder:v42";
 
   public static final String DOUBLE_CODER_URN = getUrn(StandardCoders.Enum.DOUBLE);
 
@@ -55,6 +56,7 @@ public class ModelCoders {
 
   private static final Set<String> MODEL_CODER_URNS =
       ImmutableSet.of(
+          KAFKA_RECORD_CODER_URN,
           BYTES_CODER_URN,
           INT64_CODER_URN,
           STRING_UTF8_CODER_URN,

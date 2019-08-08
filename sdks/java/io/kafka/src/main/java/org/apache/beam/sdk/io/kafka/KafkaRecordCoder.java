@@ -62,7 +62,7 @@ public class KafkaRecordCoder<K, V> extends StructuredCoder<KafkaRecord<K, V>> {
     longCoder.encode(value.getOffset(), outStream);
     longCoder.encode(value.getTimestamp(), outStream);
     intCoder.encode(value.getTimestampType().ordinal(), outStream);
-    headerCoder.encode(toIterable(value), outStream);
+    // headerCoder.encode(toIterable(value), outStream);
     kvCoder.encode(value.getKV(), outStream);
   }
 
@@ -74,7 +74,7 @@ public class KafkaRecordCoder<K, V> extends StructuredCoder<KafkaRecord<K, V>> {
         longCoder.decode(inStream),
         longCoder.decode(inStream),
         KafkaTimestampType.forOrdinal(intCoder.decode(inStream)),
-        (Headers) toHeaders(headerCoder.decode(inStream)),
+        null,
         kvCoder.decode(inStream));
   }
 

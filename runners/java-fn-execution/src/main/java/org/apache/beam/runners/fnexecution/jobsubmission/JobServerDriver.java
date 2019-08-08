@@ -249,7 +249,8 @@ public abstract class JobServerDriver implements Runnable {
   private ExpansionServer createExpansionService() throws IOException {
     ExpansionServer expansionServer =
         ExpansionServer.create(
-            new ExpansionService(), configuration.host, configuration.expansionPort);
+            // new ExpansionService(), configuration.host, configuration.expansionPort);
+            new ExpansionService(), "0.0.0.0", configuration.expansionPort);
     LOG.info(
         "Java ExpansionService started on {}:{}",
         expansionServer.getHost(),

@@ -46,6 +46,9 @@ task copyDockerfileDependencies(type: Copy) {
   into "build"
   // Entry script
   from "$resource_path/flink-job-server.sh"
+  // Custom jks keystore
+  from file("/home/beamuser/kafka_ssl/kafka.client.ods.dev.jks")
+  into "build"
   into "build"
   // Dockerfile
   from "$resource_path/Dockerfile"

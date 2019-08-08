@@ -48,6 +48,10 @@ RUN pip install /opt/apache/beam/tars/apache-beam.tar.gz[gcp] && \
     # Remove pip cache.
     rm -rf /root/.cache/pip
 
+ADD target/pot-36001-679499b7288f.json /opt/gcp/
+
 ADD target/launcher/linux_amd64/boot /opt/apache/beam/
+
+ENV GOOGLE_APPLICATION_CREDENTIALS /opt/gcp/pot-36001-679499b7288f.json
 
 ENTRYPOINT ["/opt/apache/beam/boot"]

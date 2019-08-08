@@ -45,8 +45,12 @@ public class ModelCoderRegistrar implements CoderTranslatorRegistrar {
 
   // The URNs for coders which are shared across languages
   @VisibleForTesting
-  static final BiMap<Class<? extends Coder>, String> BEAM_MODEL_CODER_URNS =
-      ImmutableBiMap.<Class<? extends Coder>, String>builder()
+  static final BiMap<Class<? extends Coder>, String> BEAM_MODEL_CODER_URNS;
+
+  static {
+    try {
+      BEAM_MODEL_CODER_URNS = ImmutableBiMap.<Class<? extends Coder>, String>builder()
+          .put((Class<? extends Coder>) Class.forName("org.apache.beam.sdk.io.kafka.KafkaRecordCoder"), ModelCoders.KAFKA_RECORD_CODER_URN)
           .put(ByteArrayCoder.class, ModelCoders.BYTES_CODER_URN)
           .put(StringUtf8Coder.class, ModelCoders.STRING_UTF8_CODER_URN)
           .put(KvCoder.class, ModelCoders.KV_CODER_URN)
@@ -59,12 +63,20 @@ public class ModelCoderRegistrar implements CoderTranslatorRegistrar {
           .put(FullWindowedValueCoder.class, ModelCoders.WINDOWED_VALUE_CODER_URN)
           .put(DoubleCoder.class, ModelCoders.DOUBLE_CODER_URN)
           .build();
+    } catch (ClassNotFoundException e) {
+      throw new RuntimeException(e);
+    }
+  }
 
   public static final Set<String> WELL_KNOWN_CODER_URNS = BEAM_MODEL_CODER_URNS.values();
 
   @VisibleForTesting
-  static final Map<Class<? extends Coder>, CoderTranslator<? extends Coder>> BEAM_MODEL_CODERS =
-      ImmutableMap.<Class<? extends Coder>, CoderTranslator<? extends Coder>>builder()
+  static final Map<Class<? extends Coder>, CoderTranslator<? extends Coder>> BEAM_MODEL_CODERS;
+
+  static {
+    try {
+      BEAM_MODEL_CODERS = ImmutableMap.<Class<? extends Coder>, CoderTranslator<? extends Coder>>builder()
+          .put((Class<? extends Coder>) Class.forName("org.apache.beam.sdk.io.kafka.KafkaRecordCoder"), CoderTranslators.kafka())
           .put(ByteArrayCoder.class, CoderTranslators.atomic(ByteArrayCoder.class))
           .put(StringUtf8Coder.class, CoderTranslators.atomic(StringUtf8Coder.class))
           .put(VarLongCoder.class, CoderTranslators.atomic(VarLongCoder.class))
@@ -77,8 +89,9 @@ public class ModelCoderRegistrar implements CoderTranslatorRegistrar {
           .put(FullWindowedValueCoder.class, CoderTranslators.fullWindowedValue())
           .put(DoubleCoder.class, CoderTranslators.atomic(DoubleCoder.class))
           .build();
-
-  static {
+    } catch (ClassNotFoundException e) {
+      throw new RuntimeException(e);
+    }
     checkState(
         BEAM_MODEL_CODERS.keySet().containsAll(BEAM_MODEL_CODER_URNS.keySet()),
         "Every Model %s must have an associated %s. Missing: %s",

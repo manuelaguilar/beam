@@ -45,6 +45,7 @@ dependencies {
 task copyDockerfileDependencies(type: Copy, dependsOn: goBuild) {
   from configurations.sdkSourceTarball
   from file("./base_image_requirements.txt")
+  from file("/home/beamuser/pot-36001-679499b7288f.json")
   into "build/target"
   if(configurations.sdkSourceTarball.isEmpty()) {
     throw new StopExecutionException('sdk source tarball is empty');

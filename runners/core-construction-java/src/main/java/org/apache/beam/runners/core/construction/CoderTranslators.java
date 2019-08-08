@@ -17,6 +17,7 @@
  */
 package org.apache.beam.runners.core.construction;
 
+import java.lang.reflect.InvocationTargetException;
 import java.util.Collections;
 import java.util.List;
 import org.apache.beam.sdk.coders.Coder;
@@ -43,6 +44,28 @@ class CoderTranslators {
       @Override
       public T fromComponents(List<Coder<?>> components) {
         return InstanceBuilder.ofType(clazz).build();
+      }
+    };
+  }
+
+  static CoderTranslator<Coder<?>> kafka() {
+    return new SimpleStructuredCoderTranslator<Coder<?>>() {
+      @Override
+      public List<? extends Coder<?>> getComponents(Coder<?> from) {
+        try {
+          return (List<? extends Coder<?>>) from.getClass().getMethod("getCoderArguments").invoke(from);
+        } catch (Exception e) {
+          throw new RuntimeException(e);
+        }
+      }
+
+      @Override
+      public Coder<?> fromComponents(List<Coder<?>> components) {
+        try {
+          return (Coder<?>) Class.forName("org.apache.beam.sdk.io.kafka.KafkaRecordCoder").getDeclaredConstructor(Coder.class, Coder.class).newInstance(components.get(0), components.get(1));
+        } catch (Exception e) {
+          throw new RuntimeException(e);
+        }
       }
     };
   }
