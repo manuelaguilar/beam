@@ -16,11 +16,15 @@
 
 from __future__ import absolute_import
 
+import datetime
 import logging
+import sys
 import unittest
+from unittest import TestCase
 
 import mock
 from bson import objectid
+from pymongo import ASCENDING
 from pymongo import ReplaceOne
 
 import apache_beam as beam
@@ -30,38 +34,138 @@ from apache_beam.io import source_test_utils
 from apache_beam.io.mongodbio import _BoundedMongoSource
 from apache_beam.io.mongodbio import _GenerateObjectIdFn
 from apache_beam.io.mongodbio import _MongoSink
+from apache_beam.io.mongodbio import _ObjectIdHelper
+from apache_beam.io.mongodbio import _ObjectIdRangeTracker
 from apache_beam.io.mongodbio import _WriteMongoFn
 from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
 
 
+class _MockMongoColl(object):
+  """Fake mongodb collection cursor."""
+
+  def __init__(self, docs):
+    self.docs = docs
+
+  def _filter(self, filter):
+    match = []
+    if not filter:
+      return self
+    if '$and' not in filter or not filter['$and']:
+      return self
+    start = filter['$and'][0]['_id'].get('$gte')
+    end = filter['$and'][0]['_id'].get('$lt')
+    assert start is not None
+    assert end is not None
+    for doc in self.docs:
+      if start and doc['_id'] < start:
+        continue
+      if end and doc['_id'] >= end:
+        continue
+      match.append(doc)
+    return match
+
+  def find(self, filter=None, **kwargs):
+    return _MockMongoColl(self._filter(filter))
+
+  def sort(self, sort_items):
+    key, order = sort_items[0]
+    self.docs = sorted(self.docs,
+                       key=lambda x: x[key],
+                       reverse=(order != ASCENDING))
+    return self
+
+  def limit(self, num):
+    return _MockMongoColl(self.docs[0:num])
+
+  def count_documents(self, filter):
+    return len(self._filter(filter))
+
+  def __getitem__(self, index):
+    return self.docs[index]
+
+
+class _MockMongoDb(object):
+  """Fake Mongo Db."""
+
+  def __init__(self, docs):
+    self.docs = docs
+
+  def __getitem__(self, coll_name):
+    return _MockMongoColl(self.docs)
+
+  def command(self, command, *args, **kwargs):
+    if command == 'collstats':
+      return {'size': 5, 'avgSize': 1}
+    elif command == 'splitVector':
+      return self.get_split_key(command, *args, **kwargs)
+
+  def get_split_key(self, command, ns, min, max, maxChunkSize, **kwargs):
+    # simulate mongo db splitVector command, return split keys base on chunk
+    # size, assuming every doc is of size 1mb
+    start_id = min['_id']
+    end_id = max['_id']
+    if start_id >= end_id:
+      return []
+    start_index = 0
+    end_index = 0
+    # get split range of [min, max]
+    for doc in self.docs:
+      if doc['_id'] < start_id:
+        start_index += 1
+      if doc['_id'] <= end_id:
+        end_index += 1
+      else:
+        break
+    # return ids of elements in the range with chunk size skip and exclude
+    # head element.
+    return {
+        'splitKeys':
+        [x['_id'] for x in self.docs[start_index:end_index:maxChunkSize]][1:]
+    }
+
+
+class _MockMongoClient(object):
+  def __init__(self, docs):
+    self.docs = docs
+
+  def __getitem__(self, db_name):
+    return _MockMongoDb(self.docs)
+
+  def __enter__(self):
+    return self
+
+  def __exit__(self, exc_type, exc_val, exc_tb):
+    pass
+
+
 class MongoSourceTest(unittest.TestCase):
-  @mock.patch('apache_beam.io.mongodbio._BoundedMongoSource'
-              '._get_document_count')
-  @mock.patch('apache_beam.io.mongodbio._BoundedMongoSource'
-              '._get_avg_document_size')
-  def setUp(self, mock_size, mock_count):
-    mock_size.return_value = 10
-    mock_count.return_value = 5
+  @mock.patch('apache_beam.io.mongodbio.MongoClient')
+  def setUp(self, mock_client):
+    self._ids = [
+        objectid.ObjectId.from_datetime(
+            datetime.datetime(year=2020, month=i + 1, day=i + 1))
+        for i in range(5)
+    ]
+    self._docs = [{'_id': self._ids[i], 'x': i} for i in range(len(self._ids))]
+    mock_client.return_value = _MockMongoClient(self._docs)
+
     self.mongo_source = _BoundedMongoSource('mongodb://test', 'testdb',
                                             'testcoll')
 
-  def test_estimate_size(self):
-    self.assertEqual(self.mongo_source.estimate_size(), 50)
+  @mock.patch('apache_beam.io.mongodbio.MongoClient')
+  def test_estimate_size(self, mock_client):
+    mock_client.return_value = _MockMongoClient(self._docs)
+    self.assertEqual(self.mongo_source.estimate_size(), 5)
 
   @mock.patch('apache_beam.io.mongodbio.MongoClient')
   def test_split(self, mock_client):
-    # desired bundle size is 1 times of avg doc size, each bundle contains 1
-    # documents
-    mock_client.return_value.__enter__.return_value.__getitem__.return_value \
-      .__getitem__.return_value.find.return_value = [{'x': 1}, {'x': 2},
-                                                     {'x': 3}, {'x': 4},
-                                                     {'x': 5}]
-    for size in [10, 20, 100]:
+    mock_client.return_value = _MockMongoClient(self._docs)
+    for size in [i * 1024 * 1024 for i in (1, 2, 10)]:
       splits = list(
-          self.mongo_source.split(start_position=0,
-                                  stop_position=5,
+          self.mongo_source.split(start_position=None,
+                                  stop_position=None,
                                   desired_bundle_size=size))
 
       reference_info = (self.mongo_source, None, None)
@@ -72,36 +176,29 @@ class MongoSourceTest(unittest.TestCase):
 
   @mock.patch('apache_beam.io.mongodbio.MongoClient')
   def test_dynamic_work_rebalancing(self, mock_client):
-    splits = list(self.mongo_source.split(desired_bundle_size=3000))
-    mock_client.return_value.__enter__.return_value.__getitem__.return_value \
-      .__getitem__.return_value.find.return_value = [{'x': 1}, {'x': 2},
-                                                     {'x': 3}, {'x': 4},
-                                                     {'x': 5}]
+    mock_client.return_value = _MockMongoClient(self._docs)
+    splits = list(
+        self.mongo_source.split(desired_bundle_size=3000 * 1024 * 1024))
     assert len(splits) == 1
     source_test_utils.assert_split_at_fraction_exhaustive(
         splits[0].source, splits[0].start_position, splits[0].stop_position)
 
-  @mock.patch('apache_beam.io.mongodbio.OffsetRangeTracker')
-  def test_get_range_tracker(self, mock_tracker):
-    self.mongo_source.get_range_tracker(None, None)
-    mock_tracker.assert_called_with(0, 5)
-    self.mongo_source.get_range_tracker(10, 20)
-    mock_tracker.assert_called_with(10, 20)
+  @mock.patch('apache_beam.io.mongodbio.MongoClient')
+  def test_get_range_tracker(self, mock_client):
+    mock_client.return_value = _MockMongoClient(self._docs)
+    self.assertIsInstance(self.mongo_source.get_range_tracker(None, None),
+                          _ObjectIdRangeTracker)
 
   @mock.patch('apache_beam.io.mongodbio.MongoClient')
   def test_read(self, mock_client):
     mock_tracker = mock.MagicMock()
-    mock_tracker.try_claim.return_value = True
-    mock_tracker.start_position.return_value = 0
-    mock_tracker.stop_position.return_value = 2
+    mock_tracker.start_position.return_value = self._ids[0]
+    mock_tracker.stop_position.return_value = self._ids[2]
 
-    mock_client.return_value.__enter__.return_value.__getitem__.return_value\
-      .__getitem__.return_value.find.return_value = [{'x':1}, {'x':2}]
+    mock_client.return_value = _MockMongoClient(self._docs)
 
-    result = []
-    for i in self.mongo_source.read(mock_tracker):
-      result.append(i)
-    self.assertListEqual([{'x': 1}, {'x': 2}], result)
+    result = list(self.mongo_source.read(mock_tracker))
+    self.assertListEqual(self._docs[0:2], result)
 
   def test_display_data(self):
     data = self.mongo_source.display_data()
@@ -109,35 +206,17 @@ class MongoSourceTest(unittest.TestCase):
     self.assertTrue('database' in data)
     self.assertTrue('collection' in data)
 
-  @mock.patch('apache_beam.io.mongodbio.MongoClient')
-  def test__get_avg_document_size(self, mock_client):
-    mock_client.return_value.__enter__.return_value.__getitem__\
-      .return_value.command.return_value = {'avgObjSize': 5}
-    self.assertEqual(5, self.mongo_source._get_avg_document_size())
-
-  @mock.patch('apache_beam.io.mongodbio.MongoClient')
-  def test_get_document_count(self, mock_client):
-    mock_client.return_value.__enter__.return_value.__getitem__ \
-      .return_value.__getitem__.return_value.count_documents.return_value = 10
-
-    self.assertEqual(10, self.mongo_source._get_document_count())
-
 
 class ReadFromMongoDBTest(unittest.TestCase):
   @mock.patch('apache_beam.io.mongodbio.MongoClient')
   def test_read_from_mongodb(self, mock_client):
-    objects = [{'x': 1}, {'x': 2}]
-    mock_client.return_value.__enter__.return_value.__getitem__.return_value. \
-      command.return_value = {'avgObjSize': 1}
-    mock_client.return_value.__enter__.return_value.__getitem__.return_value. \
-      __getitem__.return_value.find.return_value = objects
-    mock_client.return_value.__enter__.return_value.__getitem__.return_value. \
-      __getitem__.return_value.count_documents.return_value = 2
+    documents = [{'_id': objectid.ObjectId(), 'x': i} for i in range(3)]
+    mock_client.return_value = _MockMongoClient(documents)
 
     with TestPipeline() as p:
       docs = p | 'ReadFromMongoDB' >> ReadFromMongoDB(
           uri='mongodb://test', db='db', coll='collection')
-      assert_that(docs, equal_to(objects))
+      assert_that(docs, equal_to(documents))
 
 
 class GenerateObjectIdFnTest(unittest.TestCase):
@@ -190,7 +269,7 @@ class WriteToMongoDBTest(unittest.TestCase):
       _ = (p | "Create" >> beam.Create(docs)
            | "Write" >> WriteToMongoDB(db='test', coll='test'))
       p.run()
-      mock_client.return_value.__getitem__.return_value.__getitem__.\
+      mock_client.return_value.__getitem__.return_value.__getitem__. \
         return_value.bulk_write.assert_called_with(expected_update)
 
   @mock.patch('apache_beam.io.mongodbio.MongoClient')
@@ -208,6 +287,47 @@ class WriteToMongoDBTest(unittest.TestCase):
       p.run()
       mock_client.return_value.__getitem__.return_value.__getitem__. \
         return_value.bulk_write.assert_called_with(expected_update)
+
+
+class ObjectIdHelperTest(TestCase):
+  def test_conversion(self):
+    test_cases = [
+        (objectid.ObjectId('000000000000000000000000'), 0),
+        (objectid.ObjectId('000000000000000100000000'), 2**32),
+        (objectid.ObjectId('0000000000000000ffffffff'), 2**32 - 1),
+        (objectid.ObjectId('000000010000000000000000'), 2**64),
+        (objectid.ObjectId('00000000ffffffffffffffff'), 2**64 - 1),
+        (objectid.ObjectId('ffffffffffffffffffffffff'), 2**96 - 1),
+    ]
+    for (id, number) in test_cases:
+      self.assertEqual(id, _ObjectIdHelper.int_to_id(number))
+      self.assertEqual(number, _ObjectIdHelper.id_to_int(id))
+
+    # random tests
+    for _ in range(100):
+      id = objectid.ObjectId()
+      if sys.version_info[0] < 3:
+        number = int(id.binary.encode('hex'), 16)
+      else:  # PY3
+        number = int(id.binary.hex(), 16)
+      self.assertEqual(id, _ObjectIdHelper.int_to_id(number))
+      self.assertEqual(number, _ObjectIdHelper.id_to_int(id))
+
+  def test_increment_id(self):
+    test_cases = [
+        (objectid.ObjectId('000000000000000100000000'),
+         objectid.ObjectId('0000000000000000ffffffff')),
+        (objectid.ObjectId('000000010000000000000000'),
+         objectid.ObjectId('00000000ffffffffffffffff')),
+    ]
+    for (first, second) in test_cases:
+      self.assertEqual(second, _ObjectIdHelper.increment_id(first, -1))
+      self.assertEqual(first, _ObjectIdHelper.increment_id(second, 1))
+
+    for _ in range(100):
+      id = objectid.ObjectId()
+      self.assertLess(id, _ObjectIdHelper.increment_id(id, 1))
+      self.assertGreater(id, _ObjectIdHelper.increment_id(id, -1))
 
 
 if __name__ == '__main__':
